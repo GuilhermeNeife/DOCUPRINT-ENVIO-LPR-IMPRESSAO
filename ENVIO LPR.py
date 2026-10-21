@@ -1,232 +1,438 @@
 import os
 import re
-import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
-from tkinterdnd2 import TkinterDnD, DND_FILES
-from datetime import datetime
-import subprocess
 import shutil
+import subprocess
 import tempfile
+import threading
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from tkinterdnd2 import TkinterDnD, DND_FILES
 
-# Dados das máquinas e suas configurações
-machines = {
-    "OCÉ 1": "192.168.200.80",
-    "OCÉ 2": "192.168.200.81",
-    "OCÉ 3": "192.168.200.85"
+# ------------------------------------------------------------
+# CONFIGURAÇÕES POR MÁQUINA (incluindo grupo)
+# ------------------------------------------------------------
+COMMON_FORMATS_PB = ["A4", "A3", "SRA3", "22X32", "24X32", "24,5X34", "25,2X35,6", "32X45", "32X48"]
+COMMON_PAPERS_PB  = ["OFFSET 63G", "OFFSET 70G", "OFFSET 75G", "OFFSET 90G", "AVENA 70G", "AVENA 80G", "BOLD 90G"]
+
+COMMON_FORMATS_CL = ["22X32", "24X32", "25X36", "32X45", "32X48"]
+COMMON_PAPERS_CL  = ["COUCHE 90G", "OFFSET 63G", "OFFSET 70G", "OFFSET 75G", "OFFSET 90G", "AVENA 70G", "AVENA 80G", "BOLD 90G"]
+
+SPECIAL_FORMATS_RICOH = ["CAPADUPLEX", "Capas 28X56", "Capas 32X60"]
+NO_PAPER_FORMATS = SPECIAL_FORMATS_RICOH
+
+# Configuração com grupo identificador
+MACHINE_CONFIG = {
+    "OCÉ 1":   {"ip": "192.168.200.80", "group": "PB", "formats": COMMON_FORMATS_PB, "papers": COMMON_PAPERS_PB},
+    "OCÉ 2":   {"ip": "192.168.200.81", "group": "PB", "formats": COMMON_FORMATS_PB, "papers": COMMON_PAPERS_PB},
+    "RICOH":   {"ip": "192.168.200.84", "group": "CL", "formats": COMMON_FORMATS_CL + SPECIAL_FORMATS_RICOH, "papers": COMMON_PAPERS_CL},
+    "BALTORO": {"ip": "192.168.200.73", "group": "CL", "formats": COMMON_FORMATS_CL, "papers": COMMON_PAPERS_CL},
 }
 
-formats_pb = ["A4", "20,5X26", "22X32", "A3", "SRA3", "24X32", "24,5X34", "32X45", "32X48"]
-papers_pb = ["OFFSET 63G", "OFFSET 70G", "OFFSET 75G", "OFFSET 90G", "AVENA 70G", "AVENA 80G"]
+# ------------------------------------------------------------
+# CLASSE PRINCIPAL
+# ------------------------------------------------------------
+class HotfolderApp:
+    def __init__(self, root):
+        self.root = root
+        root.title("Hotfolder - Envio de PDF via LPR")
+        root.geometry("850x680")
 
-# Pega a data atual
-current_date = datetime.now().strftime("%d-%m-%Y")
+        # Pasta temporária
+        self.temp_dir = tempfile.mkdtemp(prefix="hotfolders_")
+        self._cleanup_on_exit()
 
-# Dicionário para armazenar o caminho completo dos arquivos
-file_paths = {"OCÉ 1": [], "OCÉ 2": [], "OCÉ 3": []}
+        # Controle de envio
+        self.file_paths = []
+        self.sending = False
+        self.cancel_send = False
 
-# Cria uma única pasta temporária para todos os arquivos
-common_temp_dir = tempfile.mkdtemp()
+        # Interface
+        main_frame = ttk.Frame(root, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-def on_drop(event, machine_name):
-    dropped_files = re.findall(r'\{.*?\}|\S+', event.data)  # Captura arquivos com ou sem {}
-    
-    for file in dropped_files:
-        file = file.strip('{}')  # Remove chaves ao redor do arquivo, se existirem
-        file = os.path.normpath(file)  # Normaliza o caminho do arquivo para garantir compatibilidade
+        # --- Máquina ---
+        machine_frame = ttk.LabelFrame(main_frame, text="Máquina", padding=5)
+        machine_frame.pack(fill=tk.X, pady=(0,10))
 
-        if file.endswith(".pdf"):  # Filtra apenas arquivos PDF
-            file_name = os.path.basename(file)  # Obtém o nome do arquivo
-            # Verifica se o arquivo já está na listbox para evitar duplicatas
-            if file_name not in listbox_files[machine_name].get(0, tk.END):
-                listbox_files[machine_name].insert(tk.END, file_name)
-                file_paths[machine_name].append(file)  # Armazena o caminho completo no dicionário
+        ttk.Label(machine_frame, text="Selecione a máquina:").pack(side=tk.LEFT, padx=5)
+        self.machine_var = tk.StringVar()
+        self.machine_combo = ttk.Combobox(machine_frame, textvariable=self.machine_var,
+                                          values=list(MACHINE_CONFIG.keys()), state="readonly", width=20)
+        self.machine_combo.pack(side=tk.LEFT, padx=5)
+        self.machine_combo.bind("<<ComboboxSelected>>", self.on_machine_change)
 
-def on_double_click(event, machine_name):
-    select_files_manually(machine_name)
+        self.ip_label = ttk.Label(machine_frame, text="IP: ---", foreground="blue")
+        self.ip_label.pack(side=tk.LEFT, padx=15)
 
-def select_files_manually(machine_name):
-    selected_files = filedialog.askopenfilenames(filetypes=[("PDF files", "*.pdf")])
-    if selected_files:
-        for file in selected_files:
-            file_name = os.path.basename(file)
-            if file.endswith(".pdf") and file_name not in listbox_files[machine_name].get(0, tk.END):
-                listbox_files[machine_name].insert(tk.END, file_name)
-                file_paths[machine_name].append(file)  # Armazena o caminho completo no dicionário
+        # --- Drag & Drop ---
+        drop_frame = ttk.LabelFrame(main_frame, text="Arquivos PDF", padding=5)
+        drop_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
-# Função para remover arquivos selecionados da listbox
-def delete_selected_files(machine_name):
-    selected_files = listbox_files[machine_name].curselection()
-    if selected_files:
-        for index in selected_files[::-1]:
-            listbox_files[machine_name].delete(index)
-            file_paths[machine_name].pop(index)
+        self.drop_area = tk.Label(drop_frame, text="Arraste arquivos PDF para cá", bg="#e8e8e8",
+                                  height=3, relief=tk.FLAT, font=("Arial", 10))
+        self.drop_area.pack(fill=tk.X, pady=5)
+        self.drop_area.drop_target_register(DND_FILES)
+        self.drop_area.dnd_bind('<<Drop>>', self.on_drop)
+        self._add_tooltip(self.drop_area, "Solte arquivos .pdf aqui ou clique duplo na lista para adicionar")
 
-# Função para remover todos os arquivos da listbox
-def clear_all_files(machine_name):
-    listbox_files[machine_name].delete(0, tk.END)
-    file_paths[machine_name].clear()
+        # Listbox com scroll
+        list_frame = ttk.Frame(drop_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.listbox = tk.Listbox(list_frame, height=8, selectmode=tk.EXTENDED)
+        scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox.bind("<Double-1>", self.add_files_manually)
 
-# Função para criar um arquivo temporário com um nome único e copiar o PDF para ele
-def criar_arquivo_temporario(orig_file_path, index):
-    try:
-        temp_file_path = os.path.join(common_temp_dir, f"arquivo_temp_{index}.pdf")  # Nome único para cada arquivo
-        shutil.copy(orig_file_path, temp_file_path)  # Copia o arquivo original para o temporário
-        return temp_file_path
-    except Exception as e:
-        print(f"Erro ao criar arquivo temporário: {e}")
-        return None
+        btn_frame = ttk.Frame(drop_frame)
+        btn_frame.pack(fill=tk.X, pady=2)
+        ttk.Button(btn_frame, text="Remover selecionados", command=self.delete_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Limpar todos", command=self.clear_all).pack(side=tk.RIGHT, padx=2)
 
-# Função para esvaziar ou apagar a pasta temporária após o envio
-def limpar_pasta_temporaria():
-    try:
-        if os.path.exists(common_temp_dir):
-            # Remove todos os arquivos dentro da pasta
-            for temp_file in os.listdir(common_temp_dir):
-                temp_file_path = os.path.join(common_temp_dir, temp_file)
-                os.remove(temp_file_path)
-            print(f"Todos os arquivos temporários foram removidos da pasta {common_temp_dir}.")
+        self.counter_label = ttk.Label(drop_frame, text="0 arquivo(s)", foreground="blue")
+        self.counter_label.pack(anchor=tk.W, pady=2)
+
+        # --- Formato e Papel ---
+        config_frame = ttk.LabelFrame(main_frame, text="Configuração de impressão", padding=5)
+        config_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(config_frame, text="Formato:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.format_cb = ttk.Combobox(config_frame, state="readonly", width=25)
+        self.format_cb.grid(row=0, column=1, padx=5, pady=5)
+        self.format_cb.bind("<<ComboboxSelected>>", self.on_format_change)
+
+        ttk.Label(config_frame, text="Papel/Gramatura:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        self.paper_cb = ttk.Combobox(config_frame, state="readonly", width=25)
+        self.paper_cb.grid(row=0, column=3, padx=5, pady=5)
+
+        # --- Identificação ---
+        id_frame = ttk.Frame(main_frame)
+        id_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(id_frame, text="Identificação (opcional):").pack(side=tk.LEFT)
+        self.id_entry = ttk.Entry(id_frame, width=40)
+        self.id_entry.pack(side=tk.LEFT, padx=5)
+        self._setup_placeholder()
+
+        # --- Botão Enviar, Cancelar e Progresso (sempre visíveis) ---
+        self.send_btn = ttk.Button(main_frame, text="Enviar arquivos", command=self.start_send)
+        self.send_btn.pack(fill=tk.X, pady=5)
+
+        self.cancel_btn = ttk.Button(main_frame, text="Cancelar", command=self.cancel, state=tk.DISABLED)
+        self.cancel_btn.pack(fill=tk.X, pady=2)
+
+        # Barra de progresso
+        progress_container = ttk.Frame(main_frame)
+        progress_container.pack(fill=tk.X, pady=5)
+        self.progress = ttk.Progressbar(progress_container, mode='determinate', length=400)
+        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,10))
+        self.percent_label = ttk.Label(progress_container, text="0%", width=5)
+        self.percent_label.pack(side=tk.RIGHT)
+        self.current_file_label = ttk.Label(main_frame, text="", foreground="blue", font=("Arial", 9))
+        self.current_file_label.pack(fill=tk.X, pady=2)
+
+        # --- Log ---
+        log_frame = ttk.LabelFrame(main_frame, text="Log de eventos", padding=5)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.log_text = tk.Text(log_frame, height=6, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9))
+        scroll_log = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll_log.set)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_log.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Inicializa
+        if MACHINE_CONFIG:
+            self.machine_combo.current(0)
+            self.on_machine_change()
+        self.reset_progress()
+
+    # --------------------------------------------------------
+    # Auxiliares
+    # --------------------------------------------------------
+    def _add_tooltip(self, widget, text):
+        def enter(e):
+            self.tooltip = tk.Toplevel(widget)
+            self.tooltip.wm_overrideredirect(True)
+            self.tooltip.wm_geometry(f"+{widget.winfo_rootx()+10}+{widget.winfo_rooty()+20}")
+            label = tk.Label(self.tooltip, text=text, background="#ffffe0", relief=tk.SOLID, borderwidth=1)
+            label.pack()
+        def leave(e):
+            if hasattr(self, 'tooltip'):
+                self.tooltip.destroy()
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", leave)
+
+    def _setup_placeholder(self):
+        self.placeholder = "ex: cliente_lote"
+        self.id_entry.insert(0, self.placeholder)
+        self.id_entry.configure(foreground="gray")
+        self.id_entry.bind("<FocusIn>", self._on_focus_in)
+        self.id_entry.bind("<FocusOut>", self._on_focus_out)
+
+    def _on_focus_in(self, event):
+        if self.id_entry.get() == self.placeholder:
+            self.id_entry.delete(0, tk.END)
+            self.id_entry.configure(foreground="black")
+
+    def _on_focus_out(self, event):
+        if not self.id_entry.get():
+            self.id_entry.insert(0, self.placeholder)
+            self.id_entry.configure(foreground="gray")
+
+    def _get_optional(self):
+        text = self.id_entry.get().strip()
+        if text == self.placeholder or not text:
+            return ""
+        return text
+
+    def log(self, msg):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"[{timestamp}] {msg}\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def update_counter(self):
+        count = len(self.file_paths)
+        self.counter_label.config(text=f"{count} arquivo(s)" if count != 1 else "1 arquivo")
+        if count == 0:
+            self.reset_progress()
+
+    def reset_progress(self):
+        self.progress['value'] = 0
+        self.progress['maximum'] = 1
+        self.percent_label.config(text="0%")
+        self.current_file_label.config(text="Nenhum envio em andamento")
+
+    # --------------------------------------------------------
+    # Máquina e formato
+    # --------------------------------------------------------
+    def on_machine_change(self, event=None):
+        machine = self.machine_var.get()
+        if not machine:
+            return
+        config = MACHINE_CONFIG[machine]
+        self.ip_label.config(text=f"IP: {config['ip']}")
+        self.format_cb['values'] = config["formats"]
+        self.paper_cb['values'] = config["papers"]
+        self.format_cb.set("")
+        self.paper_cb.set("")
+        if config["formats"]:
+            self.format_cb.current(0)
+            self.on_format_change()
+        if config["papers"]:
+            self.paper_cb.current(0)
+        self.log(f"Máquina alterada: {machine} ({config['ip']})")
+
+    def on_format_change(self, event=None):
+        machine = self.machine_var.get()
+        if not machine:
+            return
+        selected = self.format_cb.get()
+        if selected in NO_PAPER_FORMATS:
+            self.paper_cb.config(state=tk.DISABLED)
+            self.paper_cb.set("(sem papel)")
+            self.log(f"Formato especial: {selected} (não requer papel)")
         else:
-            print(f"Pasta temporária {common_temp_dir} não encontrada.")
-    except Exception as e:
-        print(f"Erro ao limpar a pasta temporária: {e}")
+            self.paper_cb.config(state="readonly")
+            if not self.paper_cb.get() or self.paper_cb.get() == "(sem papel)":
+                papers = MACHINE_CONFIG[machine]["papers"]
+                if papers:
+                    self.paper_cb.current(0)
 
-# Função para enviar arquivos
-def send_files(machine_name):
-    selected_format = combobox_formats[machine_name].get()
-    selected_paper = combobox_papers[machine_name].get()
-    optional_text = entry_optional_text[machine_name].get()
+    # --------------------------------------------------------
+    # Arquivos
+    # --------------------------------------------------------
+    def on_drop(self, event):
+        files = re.findall(r'\{.*?\}|\S+', event.data)
+        added = 0
+        for f in files:
+            f = f.strip('{}')
+            f = os.path.normpath(f)
+            if f.lower().endswith(".pdf") and os.path.exists(f) and f not in self.file_paths:
+                self.file_paths.append(f)
+                self.listbox.insert(tk.END, os.path.basename(f))
+                added += 1
+        if added:
+            self.update_counter()
+            self.log(f"+{added} arquivo(s) via drag & drop")
 
-    if not selected_format or not selected_paper:
-        messagebox.showwarning("Aviso", "Por favor, selecione um formato e tipo de papel.")
-        return
+    def add_files_manually(self, event=None):
+        files = filedialog.askopenfilenames(filetypes=[("PDF", "*.pdf")])
+        added = 0
+        for f in files:
+            f = os.path.normpath(f)
+            if f not in self.file_paths:
+                self.file_paths.append(f)
+                self.listbox.insert(tk.END, os.path.basename(f))
+                added += 1
+        if added:
+            self.update_counter()
+            self.log(f"+{added} arquivo(s) adicionado(s) manualmente")
 
-    # Preenche identificação vazia se o campo não foi modificado
-    if optional_text == "Identificação (Opcional)":
-        optional_text = ""
+    def delete_selected(self):
+        selected = self.listbox.curselection()
+        for idx in reversed(selected):
+            self.listbox.delete(idx)
+            del self.file_paths[idx]
+        self.update_counter()
+        self.log(f"{len(selected)} arquivo(s) removido(s)")
 
-    combined_format_paper = f"{selected_format} {selected_paper}"
+    def clear_all(self):
+        self.listbox.delete(0, tk.END)
+        self.file_paths.clear()
+        self.update_counter()
+        self.log("Lista limpa")
 
-    machine_ip = machines[machine_name]
-    files_to_send = file_paths[machine_name]
+    # --------------------------------------------------------
+    # Envio (com separador condicional)
+    # --------------------------------------------------------
+    def start_send(self):
+        machine = self.machine_var.get()
+        if not machine:
+            messagebox.showwarning("Aviso", "Selecione uma máquina.")
+            return
+        formato = self.format_cb.get()
+        if not formato:
+            messagebox.showwarning("Aviso", "Selecione um formato.")
+            return
+        if formato not in NO_PAPER_FORMATS:
+            papel = self.paper_cb.get()
+            if not papel or papel == "(sem papel)":
+                messagebox.showwarning("Aviso", "Selecione o papel/gramatura.")
+                return
+        else:
+            papel = None
 
-    if not files_to_send:
-        messagebox.showwarning("Aviso", f"Nenhum arquivo selecionado para envio na máquina {machine_name}.")
-        return
+        if not self.file_paths:
+            messagebox.showwarning("Aviso", "Nenhum arquivo para enviar.")
+            return
+        if self.sending:
+            messagebox.showinfo("Aguarde", "Envio já em andamento.")
+            return
 
-    for index, file_path in enumerate(files_to_send, start=1):
-        filename = os.path.basename(file_path)
-        fictitious_name = f"{filename[:35]}-{current_date}-{optional_text}".strip("-")
+        total = len(self.file_paths)
+        self.progress['maximum'] = total
+        self.progress['value'] = 0
+        self.percent_label.config(text="0%")
+        self.current_file_label.config(text="Preparando envio...")
 
-        # Criar arquivo temporário com nome único
-        temp_file_path = criar_arquivo_temporario(file_path, index)
-        if not temp_file_path:
-            messagebox.showerror("Erro", f"Falha ao criar arquivo temporário para {filename}.")
-            continue
+        self.sending = True
+        self.cancel_send = False
+        self.send_btn.config(state=tk.DISABLED)
+        self.cancel_btn.config(state=tk.NORMAL)
 
-        # Monta o comando lpr para enviar o PDF temporário
-        command = f'lpr -S {machine_ip} -P "{combined_format_paper}" -J "{fictitious_name}" "{temp_file_path}"'
-        print(f"Executando comando: {command}")
-        
-        try:
-            result = subprocess.run(command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if result.returncode == 0:
-                success_message = f"Arquivo {fictitious_name} enviado com sucesso para {machine_ip}."
+        thread = threading.Thread(target=self._send_thread, args=(machine, formato, papel))
+        thread.daemon = True
+        thread.start()
+
+    def cancel(self):
+        self.cancel_send = True
+        self.log("Cancelamento solicitado...")
+
+    def _send_thread(self, machine, formato, papel):
+        config = MACHINE_CONFIG[machine]
+        ip = config["ip"]
+        group = config["group"]          # "PB" ou "CL"
+        optional = self._get_optional()
+        current_date = datetime.now().strftime("%d-%m-%Y")
+        total = len(self.file_paths)
+        success = 0
+
+        # Monta o nome da fila conforme o grupo
+        if formato in NO_PAPER_FORMATS:
+            queue_name = formato   # ex: "CAPADUPLEX" (sem papel)
+        else:
+            if group == "PB":
+                # OCÉ usa espaço
+                queue_name = f"{formato} {papel}"
             else:
-                error_message = f"Erro ao enviar arquivo: {result.stderr.decode()}"
-                print(error_message)
-                messagebox.showerror("Erro", error_message)
-                
-        except subprocess.CalledProcessError as e:
-            error_message = f"Erro ao executar o comando LPR: {e}"
-            print(error_message)
-            messagebox.showerror("Erro", f"Falha ao enviar o arquivo {filename}: {e}")
+                # CL (RICOH/BALTORO) usa underscore
+                queue_name = f"{formato}_{papel}".replace(" ", "_")  # garante que não haja espaços
+        self.log(f"Fila gerada: {queue_name} (grupo {group})")
 
-    print(f"Todos os arquivos foram enviados para {machine_name}.")
-    messagebox.showinfo("Sucesso", f"Arquivos enviados com sucesso para {machine_name}!")
+        for idx, orig_path in enumerate(self.file_paths, 1):
+            if self.cancel_send:
+                break
 
-    # Limpar a pasta temporária após o envio
+            file_basename = os.path.basename(orig_path)
+            # Atualiza barra (antes do envio)
+            self.root.after(0, lambda v=idx-1: self.progress.configure(value=v))
+            percent_antes = int((idx-1) / total * 100)
+            self.root.after(0, lambda p=percent_antes: self.percent_label.config(text=f"{p}%"))
+            self.root.after(0, lambda i=idx, t=total, nome=file_basename:
+                           self.current_file_label.config(text=f"Enviando ({i}/{t}): {nome}"))
 
-    
-    # Limpa a lista de arquivos
-    listbox_files[machine_name].delete(0, tk.END)
-    file_paths[machine_name].clear()
+            # Nome fictício para o trabalho
+            base_name = file_basename[:40]
+            fictitious = f"{base_name}-{current_date}-{optional}".strip("-")
+            temp_path = os.path.join(self.temp_dir, f"{machine}_{idx}_{os.getpid()}.pdf")
+            try:
+                shutil.copy2(orig_path, temp_path)
+            except Exception as e:
+                self.log(f"ERRO cópia: {e}")
+                continue
 
+            cmd = f'lpr -S {ip} -P "{queue_name}" -J "{fictitious}" "{temp_path}"'
+            self.log(f"Enviando: {fictitious} para {ip} (fila: {queue_name})")
+            try:
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=90)
+                if result.returncode == 0:
+                    success += 1
+                    self.log(f"✓ OK: {fictitious}")
+                else:
+                    self.log(f"✗ FALHA: {fictitious} - {result.stderr.strip()}")
+            except subprocess.TimeoutExpired:
+                self.log(f"⏱ TIMEOUT: {fictitious}")
+            except Exception as e:
+                self.log(f"⚠ ERRO: {fictitious} - {e}")
+            finally:
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
 
-# Função para centralizar a janela
-def center_window(window):
-    window.update_idletasks()
-    width = window.winfo_width()
-    height = window.winfo_height()
-    x = (window.winfo_screenwidth() // 2) - (width // 2)
-    y = (window.winfo_screenheight() // 2) - (height // 2)
-    window.geometry(f'{width}x{height}+{x}+{y}')
+            # Atualiza barra após envio
+            self.root.after(0, lambda v=idx: self.progress.configure(value=v))
+            percent_depois = int(idx / total * 100)
+            self.root.after(0, lambda p=percent_depois: self.percent_label.config(text=f"{p}%"))
 
+        # Finalização
+        self.root.after(0, lambda: self.current_file_label.config(text="Envio finalizado" if success == total else "Envio com falhas"))
+        self.root.after(0, self.cancel_btn.config, {'state': tk.DISABLED})
+        self.root.after(0, self.send_btn.config, {'state': tk.NORMAL})
+        self.sending = False
 
-# Inicializa a janela principal com TkinterDnD
-root = TkinterDnD.Tk()
-root.title("HOTFOLDERS")
-root.geometry("1050x470")
-root.resizable(False, False)
-root.attributes("-toolwindow", 1)
-# Frame principal
-main_frame = tk.Frame(root)
-main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        if not self.cancel_send:
+            if success == total:
+                self.log(f"✅ Todos os {total} arquivos enviados com sucesso!")
+                self.root.after(0, lambda: messagebox.showinfo("Sucesso", f"{total} arquivo(s) enviado(s)"))
+                self.root.after(0, self.clear_all)
+                self.root.after(0, self.reset_progress)
+            else:
+                self.log(f"⚠ Enviados {success} de {total} (com falhas).")
+                self.root.after(0, lambda: messagebox.showerror("Erro parcial", f"{success}/{total} enviados. Veja o log."))
+        else:
+            self.log("Envio cancelado pelo usuário.")
+            self.root.after(0, self.reset_progress)
 
-# Criando estruturas de widgets para cada máquina
-listbox_files = {}
-combobox_formats = {}
-combobox_papers = {}
-entry_optional_text = {}
+    # --------------------------------------------------------
+    # Limpeza ao fechar
+    # --------------------------------------------------------
+    def _cleanup_on_exit(self):
+        def on_closing():
+            try:
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+            except:
+                pass
+            self.root.destroy()
+        self.root.protocol("WM_DELETE_WINDOW", on_closing)
 
-for i, machine_name in enumerate(machines.keys()):
-    # Frame da máquina
-    machine_frame = tk.Frame(main_frame, bd=2, relief=tk.SUNKEN)
-    machine_frame.grid(row=0, column=i, padx=10, pady=10)
-
-    # Label de arrastar arquivos
-    label_drag_drop = tk.Label(machine_frame, text=f"Arraste arquivos PDF para {machine_name}", width=43, height=5, bg="lightgray", fg="red", wraplength=250)
-    label_drag_drop.grid(row=0, column=0, columnspan=2, padx=5, pady=5)
-    label_drag_drop.drop_target_register(DND_FILES)
-    label_drag_drop.dnd_bind('<<Drop>>', lambda e, m=machine_name: on_drop(e, m))
-
-    # Listbox para mostrar os arquivos
-    listbox_files[machine_name] = tk.Listbox(machine_frame, selectmode=tk.MULTIPLE, width=51, height=10,selectbackground="red")
-    listbox_files[machine_name].grid(row=1, column=0, columnspan=2, padx=5, pady=5)
-
-    # Bind de clique duplo para seleção manual de arquivos
-    listbox_files[machine_name].bind("<Double-1>", lambda e, m=machine_name: on_double_click(e, m))
-
-    # Botões para remover arquivos
-    btn_delete_selected = tk.Button(machine_frame, text="Remover Selecionados", command=lambda m=machine_name: delete_selected_files(m), width=20, bg="red", fg="white")
-    btn_delete_selected.grid(row=2, column=0, padx=5, pady=5)
-
-    btn_clear_all = tk.Button(machine_frame, text="Limpar Todos", command=lambda m=machine_name: clear_all_files(m), width=20, bg="gray", fg="white")
-    btn_clear_all.grid(row=2, column=1, padx=5, pady=5)
-
-    # Seletor de formato
-    combobox_formats[machine_name] = ttk.Combobox(machine_frame, values=formats_pb, state="readonly", width=20)
-    combobox_formats[machine_name].grid(row=3, column=0, padx=5, pady=5)
-    combobox_formats[machine_name].set("Selecione o Formato")
-
-    # Seletor de papel
-    combobox_papers[machine_name] = ttk.Combobox(machine_frame, values=papers_pb, state="readonly", width=20)
-    combobox_papers[machine_name].grid(row=3, column=1, padx=5, pady=5)
-    combobox_papers[machine_name].set("Selecione o Papel")
-
-    # Campo de texto para identificação
-    entry_optional_text[machine_name] = tk.Entry(machine_frame, width=22)
-    entry_optional_text[machine_name].grid(row=4, column=1, padx=10, pady=10)
-
-    Identificador_text = tk.Label(machine_frame,text="Identificação (Opcional)")
-    Identificador_text.grid(row=4,column=0,padx=10,pady=10)
-
-   
-
-    # Botão de enviar arquivos
-    btn_send = tk.Button(machine_frame, text="Enviar Arquivos", command=lambda m=machine_name: send_files(m), width=40, bg="green", fg="white")
-    btn_send.grid(row=5, column=0, columnspan=2, padx=5, pady=10)
-
-center_window(root)
-# Inicializa a interface Tkinter
-root.mainloop()
-
+# ------------------------------------------------------------
+# EXECUÇÃO
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    root = TkinterDnD.Tk()
+    app = HotfolderApp(root)
+    root.mainloop()
