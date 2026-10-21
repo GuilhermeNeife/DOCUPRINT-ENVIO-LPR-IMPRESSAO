@@ -5,6 +5,9 @@ from tkinter import filedialog, ttk, messagebox
 from tkinterdnd2 import TkinterDnD, DND_FILES
 from datetime import datetime
 import subprocess
+import tempfile  # Adicionando tempfile para criar arquivos temporários
+import shutil  # Para copiar os arquivos temporários
+
 
 # Dados das máquinas com seus respectivos IPs para Color e PB
 machines_color = {
@@ -78,18 +81,28 @@ def clear_selection():
     file_paths.clear()  # Limpa também o dicionário de caminhos
 
 
-def extract_relevant_part(filename):
-    # Remove a extensão
-    name, _ = os.path.splitext(filename)
-    
-    # Divide o nome em partes separadas por "-"
-    parts = name.split("-")
-    
-    # Pega apenas os primeiros 4 elementos (ajuste conforme necessário)
-    relevant_part = "-".join(parts[:4])
-    
-    return relevant_part.strip()
+# Diretório temporário especificado
+temp_dir = r'N:\____REPOSITORIO GERAL POD\_CAPAS DE POD AGRUPADAS\temp.pod'
 
+# Certifica-se de que o diretório temporário existe
+if not os.path.exists(temp_dir):
+    os.makedirs(temp_dir)
+
+# Função para gerar o nome fictício baseado no nome do arquivo
+def generate_fictitious_name(file_name):
+    # Remover a extensão do arquivo
+    file_name = os.path.splitext(file_name)[0]
+    
+    # Separar o nome do arquivo usando o "-" como delimitador
+    parts = file_name.split("-")
+    
+    # Manter apenas as primeiras quatro partes
+    if len(parts) >= 4:
+        fictitious_name = "-".join(parts[:4])
+    else:
+        fictitious_name = file_name  # Caso não tenha 4 partes, usa o nome original
+    
+    return fictitious_name
 
 def send_files():
     selected_machine = combobox_machines.get()  # Nome da máquina selecionada
@@ -101,71 +114,67 @@ def send_files():
         messagebox.showwarning("Aviso", "Por favor, selecione uma máquina, formato e tipo de papel.")
         return
 
-    # Combina o formato e o tipo de papel para seguir o padrão esperado
     combined_format_paper = f"{selected_format} {selected_paper}"
 
-    machine_ip = machines[selected_machine]  # Obtém o IP da máquina selecionada
+    machine_ip = machines[selected_machine]
     files_to_send = listbox_files.get(0, tk.END)
 
     if not files_to_send:
         messagebox.showwarning("Aviso", "Nenhum arquivo selecionado para envio.")
         return
 
-    # Função para extrair a parte relevante do nome do arquivo
-    def extract_relevant_part(filename):
-        # Remove a extensão
-        name, _ = os.path.splitext(filename)
-        
-        # Divide o nome em partes separadas por "-"
-        parts = name.split("-")
-        
-        # Pega apenas os primeiros 4 elementos (ajuste conforme necessário)
-        relevant_part = "-".join(parts[:4])
-        
-        return relevant_part.strip()
-
     for file in files_to_send:
-        # Pega o caminho completo do arquivo
         file_path = file_paths.get(file)
         if not file_path:
             print(f"Erro: Caminho não encontrado para o arquivo {file}")
             continue
 
         filename = os.path.basename(file_path)
-        # Extrai apenas a parte relevante do nome
-        relevant_name = extract_relevant_part(filename)
-        
-        # Adiciona data e texto opcional ao nome fictício
-        fictitious_name = f"{relevant_name}-{current_date}-{optional_text}" if optional_text else f"{relevant_name}-{current_date}"
+        fictitious_name = generate_fictitious_name(filename)
+        fictitious_name = f"{fictitious_name}-{current_date}-{optional_text}" if optional_text else f"{fictitious_name}-{current_date}"
 
-        # Monta o comando lpr combinando o formato e o tipo de papel corretamente
-        command = f'lpr -S {machine_ip} -P "{combined_format_paper}" -J "{fictitious_name}" "{file_path}"'
-        
-        # Exibe o comando completo no console para verificação
+        # Cria um caminho para o arquivo temporário no diretório especificado
+        temp_file_path = os.path.join(temp_dir, f"{fictitious_name}.pdf")
+
+        # Copiar o arquivo original para o arquivo temporário
+        shutil.copy(file_path, temp_file_path)
+
+        # Monta o comando lpr para enviar o PDF
+        command = f'lpr -S {machine_ip} -P "{combined_format_paper}" -J "{fictitious_name}" "{temp_file_path}"'
         print(f"Executando comando: {command}")
         
         try:
-            # Executa o comando lpr e captura stdout e stderr
             result = subprocess.run(command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
-            # Verifica se o comando foi bem-sucedido
             if result.returncode == 0:
                 success_message = f"Arquivo {fictitious_name} enviado com sucesso para {machine_ip}."
-                print(success_message)  # Exibe a mensagem de sucesso no console
-                messagebox.showinfo("Sucesso", success_message)  # Exibe uma messagebox com o sucesso
             else:
                 error_message = f"Erro ao enviar arquivo: {result.stderr.decode()}"
-                print(error_message)  # Exibe o erro no console
-                messagebox.showerror("Erro", error_message)  # Exibe uma messagebox com o erro
+                print(error_message)
+                messagebox.showerror("Erro", error_message)
                 
         except subprocess.CalledProcessError as e:
             error_message = f"Erro ao executar o comando LPR: {e}"
-            print(error_message)  # Exibe o erro no console
+            print(error_message)
             messagebox.showerror("Erro", f"Falha ao enviar o arquivo {filename}: {e}")
-    
-    print("Todos os arquivos foram enviados.")  # Mensagem no console ao final do envio
-    messagebox.showinfo("Sucesso", "Arquivos enviados com sucesso!")  # Exibe uma messagebox ao final
 
+    print("Todos os arquivos foram enviados.")
+    messagebox.showinfo("Sucesso", "Arquivos enviados com sucesso!")
+    
+    # Agendar a exclusão dos arquivos temporários após 5 segundos
+    root.after(5000, delete_temp_files)
+
+# Função para excluir todos os arquivos da pasta temporária após o processo
+def delete_temp_files():
+    try:
+        # Lista todos os arquivos no diretório temporário e os exclui
+        for temp_file in os.listdir(temp_dir):
+            temp_file_path = os.path.join(temp_dir, temp_file)
+            os.remove(temp_file_path)
+        print("Todos os arquivos temporários foram excluídos.")
+        messagebox.showinfo("Sucesso", "Todos os arquivos temporários foram excluídos com sucesso!")
+    except Exception as e:
+        print(f"Erro ao excluir arquivos temporários: {e}")
+        messagebox.showwarning("Aviso", f"Não foi possível excluir os arquivos temporários: {e}")
 
 # Função para alternar entre Color e PB
 def toggle_color_mode():
