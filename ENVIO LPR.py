@@ -76,6 +76,20 @@ def criar_arquivo_temporario(orig_file_path, index):
         print(f"Erro ao criar arquivo temporário: {e}")
         return None
 
+# Função para esvaziar ou apagar a pasta temporária após o envio
+def limpar_pasta_temporaria():
+    try:
+        if os.path.exists(common_temp_dir):
+            # Remove todos os arquivos dentro da pasta
+            for temp_file in os.listdir(common_temp_dir):
+                temp_file_path = os.path.join(common_temp_dir, temp_file)
+                os.remove(temp_file_path)
+            print(f"Todos os arquivos temporários foram removidos da pasta {common_temp_dir}.")
+        else:
+            print(f"Pasta temporária {common_temp_dir} não encontrada.")
+    except Exception as e:
+        print(f"Erro ao limpar a pasta temporária: {e}")
+
 # Função para enviar arquivos
 def send_files(machine_name):
     selected_format = combobox_formats[machine_name].get()
@@ -127,26 +141,33 @@ def send_files(machine_name):
             print(error_message)
             messagebox.showerror("Erro", f"Falha ao enviar o arquivo {filename}: {e}")
 
-        finally:
-            # Remover o arquivo temporário após o envio
-            try:
-                os.remove(temp_file_path)
-                print(f"Arquivo temporário {temp_file_path} removido.")
-            except Exception as e:
-                print(f"Erro ao remover arquivo temporário: {e}")
-
     print(f"Todos os arquivos foram enviados para {machine_name}.")
     messagebox.showinfo("Sucesso", f"Arquivos enviados com sucesso para {machine_name}!")
+
+    # Limpar a pasta temporária após o envio
+
     
     # Limpa a lista de arquivos
     listbox_files[machine_name].delete(0, tk.END)
     file_paths[machine_name].clear()
 
+
+# Função para centralizar a janela
+def center_window(window):
+    window.update_idletasks()
+    width = window.winfo_width()
+    height = window.winfo_height()
+    x = (window.winfo_screenwidth() // 2) - (width // 2)
+    y = (window.winfo_screenheight() // 2) - (height // 2)
+    window.geometry(f'{width}x{height}+{x}+{y}')
+
+
 # Inicializa a janela principal com TkinterDnD
 root = TkinterDnD.Tk()
-root.title("Gerenciador de Arquivos e Envio")
-root.geometry("1000x600")
-
+root.title("HOTFOLDERS")
+root.geometry("1050x470")
+root.resizable(False, False)
+root.attributes("-toolwindow", 1)
 # Frame principal
 main_frame = tk.Frame(root)
 main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -163,13 +184,13 @@ for i, machine_name in enumerate(machines.keys()):
     machine_frame.grid(row=0, column=i, padx=10, pady=10)
 
     # Label de arrastar arquivos
-    label_drag_drop = tk.Label(machine_frame, text=f"Arraste arquivos PDF para {machine_name}", width=40, height=5, bg="lightgray", fg="red", wraplength=250)
+    label_drag_drop = tk.Label(machine_frame, text=f"Arraste arquivos PDF para {machine_name}", width=43, height=5, bg="lightgray", fg="red", wraplength=250)
     label_drag_drop.grid(row=0, column=0, columnspan=2, padx=5, pady=5)
     label_drag_drop.drop_target_register(DND_FILES)
     label_drag_drop.dnd_bind('<<Drop>>', lambda e, m=machine_name: on_drop(e, m))
 
     # Listbox para mostrar os arquivos
-    listbox_files[machine_name] = tk.Listbox(machine_frame, selectmode=tk.MULTIPLE, width=40, height=10)
+    listbox_files[machine_name] = tk.Listbox(machine_frame, selectmode=tk.MULTIPLE, width=51, height=10,selectbackground="red")
     listbox_files[machine_name].grid(row=1, column=0, columnspan=2, padx=5, pady=5)
 
     # Bind de clique duplo para seleção manual de arquivos
@@ -193,15 +214,19 @@ for i, machine_name in enumerate(machines.keys()):
     combobox_papers[machine_name].set("Selecione o Papel")
 
     # Campo de texto para identificação
-    entry_optional_text[machine_name] = tk.Entry(machine_frame, width=43)
-    entry_optional_text[machine_name].grid(row=4, column=0, columnspan=2, padx=5, pady=5)
-    entry_optional_text[machine_name].insert(0, "Identificação (Opcional)")
+    entry_optional_text[machine_name] = tk.Entry(machine_frame, width=22)
+    entry_optional_text[machine_name].grid(row=4, column=1, padx=10, pady=10)
+
+    Identificador_text = tk.Label(machine_frame,text="Identificação (Opcional)")
+    Identificador_text.grid(row=4,column=0,padx=10,pady=10)
+
+   
 
     # Botão de enviar arquivos
     btn_send = tk.Button(machine_frame, text="Enviar Arquivos", command=lambda m=machine_name: send_files(m), width=40, bg="green", fg="white")
     btn_send.grid(row=5, column=0, columnspan=2, padx=5, pady=10)
 
+center_window(root)
 # Inicializa a interface Tkinter
 root.mainloop()
-
 
